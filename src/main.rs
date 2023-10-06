@@ -20,22 +20,23 @@ use serde::Deserialize;
 
 #[derive(PartialEq)]
 enum HostState {
-    WAITING_FOR_CON,
-    HOST_PLAYING,
-    CLIENT_PLAYING,
-    TESTING_CLIENT_MOVE,
-    CLIENT_MOVE_BAD,
-    SEND_TO_CLIENT_C,
-    SEND_TO_CLIENT_H
+    WaitingForCon,
+    HostPlaying,
+    ClientPlaying,
+    TestingClientMove,
+    BadClientMove,
+    RespondToClient,
+    SendToClient,
+    PromotingHost,
+    PromotingClient
 }
 
 #[derive(PartialEq)]
 enum ClientState {
-    PENDING,
-    HOST_PLAYING,
-    CLIENT_PLAYING,
-    WAITING_FOR_BOARD_S,
-    WAITING_FOR_BOARD_R,
+    Pending,
+    HostPlaying,
+    ClientPlaying,
+    WaitingForResponse,
 }
 
 struct HostGame {
@@ -61,7 +62,7 @@ struct ClientGame {
     black_pos: Vec<(usize, usize, usize)>,
     game_end: bool,
     promoting: bool,
-    selected_prom: chess_network_protocol::Piece,
+    _selected_prom: chess_network_protocol::Piece,
     host_turn: bool,
     m_from: (usize, usize),
     m_to: (usize, usize),
@@ -115,7 +116,7 @@ impl HostGame {
             recieved_move: (usize::MAX, usize::MAX, usize::MAX, usize::MAX),
             made_move: (usize::MAX, usize::MAX, usize::MAX, usize::MAX),
             client_connected: false,
-            state: HostState::WAITING_FOR_CON
+            state: HostState::WaitingForCon
         };
     }
 }
@@ -155,12 +156,12 @@ impl ClientGame {
             white_pos: vec![],
             game_end: false,
             promoting: false,
-            selected_prom: chess_network_protocol::Piece::None,
+            _selected_prom: chess_network_protocol::Piece::None,
             host_turn: true,
             m_from: (usize::MAX, usize::MAX),
             m_to: (usize::MAX, usize::MAX),
             send_move: false,
-            state: ClientState::PENDING
+            state: ClientState::Pending
         };
     }
 }
@@ -168,6 +169,7 @@ impl ClientGame {
 fn main() {
     let host: bool;
     let address: String;
+    let c_white: bool;
     let args: Vec<String> = env::args().collect::<Vec<String>>();
     if args.len() > 1 {
         host = false;
@@ -175,6 +177,12 @@ fn main() {
     } else {
         host = true;
         address = "".to_string();
+    }
+
+    if args.len() > 2 {
+        c_white = if args[2].to_lowercase() == "b" { false } else { true };
+    } else {
+        c_white = true;
     }
 
     let mut glfw = init(fail_on_errors!()).unwrap();
@@ -229,7 +237,7 @@ fn main() {
             let mut de = serde_json::Deserializer::from_reader(&stream);
 
             let handshake = ClientToServerHandshake {
-                server_color: Color::Black,
+                server_color: if c_white { Color::Black } else { Color::White }
             };
         
             serde_json::to_writer(&stream, &handshake).unwrap();
@@ -238,8 +246,8 @@ fn main() {
 
             let mut game = network.lock().unwrap();
 
-            game.state = ClientState::CLIENT_PLAYING;
-            game.host_turn = false;     
+            game.state = if c_white { ClientState::ClientPlaying } else { ClientState::HostPlaying };
+            game.host_turn = if c_white { false } else { true };
 
             for y in 0..8 {
                 for x in 0..8 {
@@ -259,15 +267,13 @@ fn main() {
                 }
             }
 
-            println!("What.");
-
             std::mem::drop(game);
 
             loop {
                 let mut game = network.lock().unwrap();
                 
                 match game.state {
-                    ClientState::CLIENT_PLAYING => {
+                    ClientState::ClientPlaying => {
                         if game.send_move {
                             let m = Move{ start_x: game.m_from.0, start_y: game.m_from.1, end_x: game.m_to.0, end_y: game.m_to.1, promotion: Piece::None };
                             let move_to_send = ClientToServer::Move(m);
@@ -275,11 +281,11 @@ fn main() {
                             game.send_move = false;
                             game.m_from = (usize::MAX, usize::MAX);
                             game.m_to = (usize::MAX, usize::MAX);
-                            game.state = ClientState::WAITING_FOR_BOARD_S;
+                            game.state = ClientState::WaitingForResponse;
                         }
                     }
 
-                    ClientState::WAITING_FOR_BOARD_S => {
+                    ClientState::WaitingForResponse => {
                         std::mem::drop(game);
                         let res = ServerToClient::deserialize(&mut de).unwrap();
 
@@ -311,7 +317,7 @@ fn main() {
                                 game.game_end = if j != Joever::Ongoing { true } else { false };
                                 game.host_turn = true;
 
-                                game.state = ClientState::HOST_PLAYING;
+                                game.state = ClientState::HostPlaying;
                             }
 
                             ServerToClient::Error { board: b, moves: _, joever: _, message: _ } => {
@@ -333,14 +339,14 @@ fn main() {
                                     }
                                 }
 
-                                game.state = ClientState::CLIENT_PLAYING;
+                                game.state = ClientState::ClientPlaying;
                             }
 
                             _ => { }
                         }
                     }
 
-                    ClientState::HOST_PLAYING => {
+                    ClientState::HostPlaying => {
                         std::mem::drop(game);
                         let res = ServerToClient::deserialize(&mut de).unwrap();
 
@@ -372,7 +378,7 @@ fn main() {
                                 game.game_end = if j != Joever::Ongoing { true } else { false };
                                 game.host_turn = false;
 
-                                game.state = ClientState::CLIENT_PLAYING;
+                                game.state = ClientState::ClientPlaying;
                             }
 
                             _ => { }
@@ -421,7 +427,7 @@ fn main() {
                 if game.game_end {
                     let winner = if game.host_turn { "You lose!" } else { "You win!" };
                     render_text(&text_shader, winner.to_string(), 800.0, 640.0, 0.7, vec4(1.0, 1.0, 1.0, 1.0), &characters, &mut char_quad);
-                    render_text(&text_shader, "Press \'R\' to restart.".to_string(), 800.0, 610.0, 0.44, vec4(1.0, 1.0, 1.0, 1.0), &characters, &mut char_quad);
+                    render_text(&text_shader, "Press \'ESC\' to exit.".to_string(), 800.0, 610.0, 0.44, vec4(1.0, 1.0, 1.0, 1.0), &characters, &mut char_quad);
                 } else {
                     let turn = if game.host_turn { "Host is playing." } else { "You are playing." };
                     render_text(&text_shader, turn.to_string(),  800.0, 640.0, 0.5, vec4(1.0, 1.0, 1.0, 1.0), &characters, &mut char_quad);
@@ -460,7 +466,7 @@ fn main() {
                     }
 
                     WindowEvent::MouseButton(MouseButton::Button1, Action::Press, _) => {
-                        if !game.game_end && !game.promoting && game.state == ClientState::CLIENT_PLAYING {
+                        if !game.game_end && !game.promoting && game.state == ClientState::ClientPlaying {
                             client_on_pick(&mut game, &window);
                         }
                     }
@@ -505,7 +511,7 @@ fn main() {
 
             game.host_turn = if des.server_color == Color::White { true } else { false };
             game.client_connected = true;
-            game.state = if game.host_turn { HostState::HOST_PLAYING } else { HostState::CLIENT_PLAYING };
+            game.state = if game.host_turn { HostState::HostPlaying } else { HostState::ClientPlaying };
 
             let mut board_copy = [[Piece::None; 8]; 8];
             for (p, x, y) in game.chess.get_black_positions().to_owned() {
@@ -548,7 +554,7 @@ fn main() {
                 let mut game = network.lock().unwrap();
                 
                 match game.state {
-                    HostState::CLIENT_PLAYING => {
+                    HostState::ClientPlaying => {
                         std::mem::drop(game);
                         let res = ClientToServer::deserialize(&mut de).unwrap().to_owned();
                         
@@ -559,12 +565,12 @@ fn main() {
                             ClientToServer::Resign => { game.game_end = true; }
                             ClientToServer::Move(Move{ start_x: sx, start_y: sy, end_x: ex, end_y: ey, promotion: _ }) => {
                                 game.recieved_move = (sx, sy, ex, ey);
-                                game.state = HostState::TESTING_CLIENT_MOVE;
+                                game.state = HostState::TestingClientMove;
                             }
                         }
                     }
                     
-                    HostState::SEND_TO_CLIENT_C => {
+                    HostState::RespondToClient => {
                         let mut board_copy = [[Piece::None; 8]; 8];
                         for (p, x, y) in game.chess.get_black_positions().to_owned() {
                             board_copy[y as usize][x as usize] = match p {
@@ -606,10 +612,10 @@ fn main() {
                         game.recieved_move = (0,0,0,0);
                         game.host_turn = true;
 
-                        game.state =  HostState::HOST_PLAYING;
+                        game.state =  HostState::HostPlaying;
                     }
 
-                    HostState::CLIENT_MOVE_BAD => {
+                    HostState::BadClientMove => {
                         let mut board_copy = [[Piece::None; 8]; 8];
                         for (p, x, y) in game.chess.get_black_positions().to_owned() {
                             board_copy[y as usize][x as usize] = match p {
@@ -641,10 +647,10 @@ fn main() {
                         };
 
                         serde_json::to_writer(&stream, &send).unwrap();
-                        game.state = HostState::CLIENT_PLAYING;
+                        game.state = HostState::ClientPlaying;
                     }
 
-                    HostState::SEND_TO_CLIENT_H => {
+                    HostState::SendToClient => {
                         let mut board_copy = [[Piece::None; 8]; 8];
 
                         for (p, x, y) in game.chess.get_black_positions().to_owned() {
@@ -686,7 +692,7 @@ fn main() {
                         game.made_move = (usize::MAX, usize::MAX, usize::MAX, usize::MAX);
                         game.host_turn = false;
 
-                        game.state =  HostState::CLIENT_PLAYING;
+                        game.state =  HostState::ClientPlaying;
                     }
 
                     _ => { }
@@ -731,7 +737,7 @@ fn main() {
                 if game.game_end {
                     let winner = if game.host_turn { "You lose!" } else { "You win!" };
                     render_text(&text_shader, winner.to_string(), 800.0, 640.0, 0.7, vec4(1.0, 1.0, 1.0, 1.0), &characters, &mut char_quad);
-                    render_text(&text_shader, "Press \'R\' to restart.".to_string(), 800.0, 610.0, 0.44, vec4(1.0, 1.0, 1.0, 1.0), &characters, &mut char_quad);
+                    render_text(&text_shader, "Press \'ESC\' to exit.".to_string(), 800.0, 610.0, 0.44, vec4(1.0, 1.0, 1.0, 1.0), &characters, &mut char_quad);
                 } else {
                     let turn = if game.host_turn { "You are playing." } else { "Client is playing." };
                     render_text(&text_shader, turn.to_string(),  800.0, 640.0, 0.5, vec4(1.0, 1.0, 1.0, 1.0), &characters, &mut char_quad);
@@ -740,26 +746,28 @@ fn main() {
 
             match game.chess.get_state() {
                 ludviggl_chess::State::SelectPiece => {
-                    if game.state == HostState::TESTING_CLIENT_MOVE {
+                    if game.state == HostState::TestingClientMove {
                         let m = (game.recieved_move.0 as u8, game.recieved_move.1 as u8);
                         game.chess.select_piece(m.0, m.1).unwrap();
                         
                         if game.chess.get_state() as i8 == ludviggl_chess::State::SelectPiece as i8 {
-                            game.state = HostState::CLIENT_MOVE_BAD;
+                            game.state = HostState::BadClientMove;
                         }
                     }
                 }
 
                 ludviggl_chess::State::SelectMove => {
-                    if game.state == HostState::TESTING_CLIENT_MOVE {
+                    if game.state == HostState::TestingClientMove {
                         let p_player = game.chess.get_current_player() as i8;
                         let m = (game.recieved_move.2 as u8, game.recieved_move.3 as u8);
                         game.chess.select_move(m.0, m.1).unwrap();
 
-                        if p_player == game.chess.get_current_player() as i8 {
-                            game.state = HostState::CLIENT_MOVE_BAD;
+                        if game.chess.get_state() as u8 == 3 {
+                            game.state = HostState::PromotingClient;
+                        } else if p_player == game.chess.get_current_player() as i8 {
+                            game.state = HostState::BadClientMove;
                         } else {
-                            game.state = HostState::SEND_TO_CLIENT_C;
+                            game.state = HostState::RespondToClient;
                         }
                     }
                 }
@@ -773,19 +781,11 @@ fn main() {
                 }
 
                 ludviggl_chess::State::SelectPromotion => {
-                    game.promoting = true;
-                    text_shader.use_program();
-                    text_shader.set_mat4("projection", text_proj);
-                    render_text(&text_shader, "Select promotion:".to_string(), 800.0, 600.0, 0.5, vec4(1.0, 1.0, 1.0, 1.0), &characters, &mut char_quad);
-                    render_text(&text_shader, "1: Rook".to_string(), 800.0, 570.0, 0.6, vec4(1.0, 1.0, 1.0, 1.0), &characters, &mut char_quad);
-                    render_text(&text_shader, "2: Knight".to_string(), 800.0, 540.0, 0.6, vec4(1.0, 1.0, 1.0, 1.0), &characters, &mut char_quad);
-                    render_text(&text_shader, "3: Bishop".to_string(), 800.0, 510.0, 0.6, vec4(1.0, 1.0, 1.0, 1.0), &characters, &mut char_quad);
-                    render_text(&text_shader, "4: Queen".to_string(), 800.0, 480.0, 0.6, vec4(1.0, 1.0, 1.0, 1.0), &characters, &mut char_quad);
-
-                    let prom = game.selected_prom;
-                    if game.chess.select_promotion(prom).is_ok() {
-                        game.promoting = false;
-                        game.selected_prom = ludviggl_chess::Piece::Pawn;
+                    game.chess.select_promotion(ludviggl_chess::Piece::Queen).unwrap();
+                    if game.state == HostState::PromotingClient {
+                        game.state = HostState::RespondToClient;
+                    } else {
+                        game.state = HostState::SendToClient;
                     }
                 }
 
@@ -799,7 +799,7 @@ fn main() {
                     }
 
                     WindowEvent::MouseButton(MouseButton::Button1, Action::Press, _) => {
-                        if !game.game_end && !game.promoting && game.state == HostState::HOST_PLAYING && game.client_connected {
+                        if !game.game_end && !game.promoting && game.state == HostState::HostPlaying && game.client_connected {
                             host_on_pick(&mut game, &window);
                         }
                     }
@@ -871,7 +871,11 @@ fn host_on_pick(game: &mut HostGame, window: &Window) {
                 } else {
                     game.made_move.2 = x;
                     game.made_move.3 = y;
-                    game.state = HostState::SEND_TO_CLIENT_H;
+                    if game.chess.get_state() as i8 == 3 {
+                        game.state = HostState::PromotingHost;
+                    } else {
+                        game.state = HostState::SendToClient;
+                    }
                 }
             }
 
